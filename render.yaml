@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: asha-voicecare
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      # Prompted securely by Render. Never commit the real key.
+      - key: GNANI_API_KEY
+        sync: false
+      # Free instances have ephemeral storage. Attach a disk and point this at
+      # /data/asha.db if the demo needs records to survive a restart.
+      - key: DATABASE_PATH
+        value: /tmp/asha.db

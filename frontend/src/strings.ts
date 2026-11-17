@@ -539,6 +539,14 @@ export const S: Record<string, Dict> = {
     "ta-IN": "குரலுக்கு மைக்ரோஃபோன் அனுமதி தேவை.",
     "hi-IN": "वॉइस के लिए माइक अनुमति चाहिए.",
   },
+  voiceNotConfigured: {
+    "en-IN":
+      "Voice is unavailable because this server has no speech key. Set GNANI_API_KEY on the backend, or enter the visit manually.",
+    "ta-IN":
+      "இந்த சேவையகத்தில் பேச்சு விசை இல்லாததால் குரல் கிடைக்கவில்லை. பின்தளத்தில் GNANI_API_KEY அமைக்கவும் அல்லது கைமுறையாக உள்ளிடவும்.",
+    "hi-IN":
+      "इस सर्वर पर स्पीच कुंजी न होने के कारण वॉइस उपलब्ध नहीं है. बैकएंड पर GNANI_API_KEY सेट करें या विज़िट मैन्युअल दर्ज करें.",
+  },
   startingMic: { "en-IN": "Starting microphone…", "ta-IN": "மைக்ரோஃபோன் தொடங்குகிறது…", "hi-IN": "माइक्रोफ़ोन शुरू हो रहा है…" },
   visitSaved: { "en-IN": "Visit saved.", "ta-IN": "வருகை சேமிக்கப்பட்டது.", "hi-IN": "विज़िट सहेजी गई." },
 };

@@ -109,6 +109,7 @@ export default function App() {
   const [pending, setPending] = useState<FollowUp[]>([]);
   const [error, setError] = useState<AppError | null>(null);
   const [offline, setOffline] = useState(!navigator.onLine);
+  const [voiceConfigured, setVoiceConfigured] = useState<boolean | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -163,6 +164,23 @@ export default function App() {
   useEffect(() => {
     void refreshData();
   }, [refreshData]);
+
+  // The speech key lives only on the server. Check it before offering voice so
+  // a misconfigured deployment fails clearly instead of after the mic opens.
+  useEffect(() => {
+    let alive = true;
+    void api
+      .config()
+      .then((config) => {
+        if (alive) setVoiceConfigured(config.gnani_configured);
+      })
+      .catch(() => {
+        if (alive) setVoiceConfigured(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [newVisitOpen]);
 
   // ---------------------------------------------------------------- speech
   const stopAudio = useCallback(() => {
@@ -361,6 +379,11 @@ export default function App() {
   // --------------------------------------------------------------- actions
   const startVisit = useCallback(async () => {
     if (starting) return;
+    if (voiceConfigured === false) {
+      setNewVisitOpen(false);
+      setError({ message: S.voiceNotConfigured[languageRef.current], kind: "voice", openTab: true });
+      return;
+    }
     setNewVisitOpen(false);
     setManualOpen(false);
     setDetailId(null);
@@ -396,7 +419,7 @@ export default function App() {
     } finally {
       setStarting(false);
     }
-  }, [connect, ensureVoice, resetVisitState, starting, voiceErrorMessage]);
+  }, [connect, ensureVoice, resetVisitState, starting, voiceConfigured, voiceErrorMessage]);
 
   const stopVisit = useCallback(() => {
     setPhase("finalising");
@@ -901,7 +924,8 @@ export default function App() {
             <button
               type="button"
               onClick={() => void startVisit()}
-              className="w-full rounded-2xl bg-brand-700 px-4 py-3 text-sm font-bold text-white"
+              disabled={voiceConfigured === false}
+              className="w-full rounded-2xl bg-brand-700 px-4 py-3 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
             >
               🎙 {S.startVoice[language]}
             </button>
@@ -916,7 +940,13 @@ export default function App() {
         }
       >
         <p className="text-sm leading-relaxed text-slate-600">{S.newVisitBody[language]}</p>
-        <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[11px] text-slate-500">{S.voiceNeedsMic[language]}</p>
+        <p
+          className={`mt-2 rounded-xl px-3 py-2 text-[11px] ${
+            voiceConfigured === false ? "bg-amber-50 text-amber-800" : "bg-slate-50 text-slate-500"
+          }`}
+        >
+          {voiceConfigured === false ? S.voiceNotConfigured[language] : S.voiceNeedsMic[language]}
+        </p>
       </Modal>
 
       <ProfileDialog

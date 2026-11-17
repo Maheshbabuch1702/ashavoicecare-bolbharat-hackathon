@@ -118,6 +118,62 @@ that directory exists, so the whole demo can run from one process.
 
 The template is at [`.env.example`](.env.example).
 
+### Deploying a live demo
+
+Voice needs the long-running FastAPI process (WebSocket + server-side key), so a
+static host such as GitHub Pages cannot run this app by itself. The app must be
+deployed to a container/VM host, and the key must be set as a **server
+environment variable** there:
+
+- **Never commit `backend/.env` or put the key in `VITE_*` variables.** Vite
+  bakes those into the public JavaScript bundle.
+- The backend reads `GNANI_API_KEY` from the process environment first; a local
+  `backend/.env` is only a development fallback.
+- After deploying, open `/api/health` and confirm `"gnani_configured": true`.
+  If it is false, the process cannot see the variable — set it in the host's
+  dashboard and redeploy/restart.
+
+**Docker (any host):**
+
+```powershell
+docker build -t asha-voicecare .
+docker run --rm -p 8000:8000 `
+  -e GNANI_API_KEY="<your-gnani-key>" `
+  -v asha-data:/data `
+  -e DATABASE_PATH=/data/asha.db `
+  asha-voicecare
+```
+
+Open <http://localhost:8000>. Do not copy the key into an image layer or a
+committed file.
+
+**Render (one-click blueprint):**
+
+1. Create a new **Blueprint** in Render and select this repository. Render reads
+   [`render.yaml`](render.yaml).
+2. When prompted for `GNANI_API_KEY`, paste the key. Render stores it as a secret
+   and injects it at runtime.
+3. Deploy, then check `https://<service>.onrender.com/api/health` for
+   `"gnani_configured": true`.
+
+The free blueprint uses `/tmp/asha.db`, so demo records reset when the instance
+restarts. Attach a persistent disk and set `DATABASE_PATH=/data/asha.db` if that
+matters. The database starts empty; seed the synthetic demo through the host's
+shell:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe tools\seed_demo_data.py
+```
+
+On Render, use the service **Shell** and run `python tools/seed_demo_data.py`
+from `backend/`.
+
+**Split frontend/backend:** build the frontend with
+`VITE_API_BASE=https://your-backend.example.com`, and set the backend's
+`FRONTEND_ORIGIN` to the frontend origin so REST CORS and the WebSocket both
+work. Keeping both behind one origin, as the Dockerfile does, avoids this.
+
 ---
 
 ## Demo script
@@ -400,6 +456,8 @@ asha-voicecare/
 ├── frontend/
 │   └── src/               React screens, audio worklet, strings, API client
 ├── supabase_schema.sql    hosted Postgres schema
+├── Dockerfile             one-container live deployment
+├── render.yaml            Render blueprint (prompts for the secret key)
 ├── .env.example
 └── README.md
 ```
