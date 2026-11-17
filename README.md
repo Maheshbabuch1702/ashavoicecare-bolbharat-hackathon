@@ -11,6 +11,10 @@ automatically.
 > worker's spoken confirmation before it is saved. Use synthetic beneficiaries
 > only — never enter real patient data.
 
+> **Live demo:** <https://asha-voicecare.onrender.com>
+> (Render free plan: the first request can take 30–60 s to wake, and the `/tmp`
+> database resets whenever the instance restarts.)
+
 ---
 
 ## The five required modules
