@@ -19,9 +19,25 @@ automatically.
 | --- | --- | --- |
 | 1. Streaming speech-to-text (not record-then-upload) | The browser streams 512-sample PCM frames over a WebSocket. FastAPI proxies them to Gnani Prisma v3.0, returns live interim text every ~450 ms, then a final transcript per utterance. | `frontend/src/audio.ts`, `backend/app/gnani.py`, `backend/app/session.py` |
 | 2. AI-built structured record | Deterministic rule extractor turns the transcript into a `VisitRecord`: beneficiary ID, name, visit type, weight, ANC/IFA status, vaccination, next visit, observations. Missing fields stay `null` and are surfaced as questions — nothing is invented. An optional OpenAI-compatible LLM adapter can be enabled, but its output is validated and falls back to rules. | `backend/app/extract.py`, `backend/app/normalize.py` |
-| 3. Spoken confirmation and correction (with barge-in) | The record is read back with Gnani Timbral TTS. The worker can interrupt mid-sentence (client-side RMS barge-in), say "No, weight is 2.8 kilo", and the parser maps the utterance to exactly one field before re-reading it. | `backend/app/dialog.py`, `frontend/src/audio.ts`, `frontend/src/App.tsx` |
+| 3. Spoken confirmation and correction (with barge-in) | The record is read back with Gnani Timbre TTS. The worker can interrupt mid-sentence (client-side RMS barge-in), say "No, weight is 2.8 kilo", and the parser maps the utterance to exactly one field before re-reading it. | `backend/app/dialog.py`, `frontend/src/audio.ts`, `frontend/src/App.tsx` |
 | 4. Danger-sign detection + PHC referral | A fixed, guideline-derived rule engine runs **independently of the LLM**. It is negation-aware ("no bleeding", "bleeding illa" do not alert), infers mother vs newborn subject, speaks an alarm immediately, and creates an urgent "refer to PHC today" task. | `backend/app/danger.py`, `backend/app/followups.py` |
 | 5. Automatic follow-up list | Each confirmed visit produces scheduled tasks: next visit, IFA compliance, vaccination gaps, ANC gaps, newborn HBNC checks, and emergency referrals. Tasks have due dates, priorities and completion status. | `backend/app/followups.py`, `backend/app/db.py`, `frontend/src/components/FollowUpList.tsx` |
+
+### Judge-facing coverage
+
+This table maps each live-scoring dimension to concrete evidence in the build
+rather than self-assigned scores.
+
+| Dimension | Evidence in this build | Where to verify |
+| --- | --- | --- |
+| **Task success** | One continuous visit: streamed dictation → structured draft → spoken read-back → spoken correction → confirm → saved visit + follow-ups. | `e2e_ws.py normal/danger/correction`, `e2e_audio.py`, `smoke_ui.py` |
+| **Field accuracy** | Real Gnani audio returns Lakshmi / ASHA102 / pregnancy ANC / 55.0 kg / ANC done / IFA given / 20 Nov on clean, 1.5 s-pause and 15 dB-SNR fixtures. Unspoken fields stay `null`. | `backend/tests/test_rules.py`, `backend/tools/e2e_audio.py` |
+| **Time to first audio** | Warm streaming TTS first body **0.59–0.66 s**; automatic endpoint stop→draft **0.42 s**; manual stop→draft **1.14 s**. | “Measured performance” below |
+| **Speech-layer depth** | Streaming PCM STT, interim partials (~0.45 s), Gnani VAD + client endpointing, barge-in, SSE PCM TTS with WAV fallback, keyterms/topic bias, code-mix repair. | `frontend/src/audio.ts`, `backend/app/gnani.py`, `backend/app/session.py` |
+| **Target-user fit** | Mobile-first ASHA layout, one large mic target, English/Tamil/Hindi prompts and spoken read-back, typed fallback when a mic fails. Designed for ASHA workers; not yet field-tested with them. | `frontend/src/screens/`, `frontend/src/strings.ts` |
+| **Innovation** | Digit-by-digit beneficiary-ID read-back, named due vaccines, single-field spoken correction, deterministic danger rules independent of the LLM. | `backend/app/dialog.py`, `backend/app/danger.py` |
+| **Responsible AI** | No diagnosis or treatment; no invented fields; deterministic guideline referral; no audio persisted; key stays server-side; synthetic data only; no fabricated page numbers. | “How the record is kept honest”, “Guideline citation block” |
+| **Demo and docs** | Scripted demos, synthetic seed data, Docker/Render deployment, health check, repeatable test commands. | This README, `render.yaml`, `Dockerfile` |
 
 ---
 
@@ -30,7 +46,8 @@ automatically.
 ```
 ┌──────────────────────────── Browser (React + Tailwind) ───────────────────────────┐
 │  Mic → AudioWorklet (512 samples / 1024 bytes) ──► WebSocket /ws/visit            │
-│  Speaker ◄── WAV from /api/tts ◄── JSON "speak" events                            │
+│  Speaker ◄── PCM chunks from /api/tts/stream ◄── JSON "speak" events              │
+│              (WAV /api/tts fallback)                                              │
 └──────────────────────────────────────┬────────────────────────────────────────────┘
                                        │ PCM frames + JSON commands
                                        ▼
@@ -46,8 +63,14 @@ automatically.
 └────────────────────────────────────────────────────────────────────────────────────┘
                                        │
                                        ▼
-                          Gnani TTS (Shivani, timbre-v3.0)
+                     Gnani TTS (Shivani, timbre-v3.0, SSE streaming)
 ```
+
+Client-side endpointing runs alongside the stream: after the worker has spoken,
+at least one interim transcript exists, and the mic stays below the speech
+threshold for **3 s**, the browser sends `{"type":"stop","quiet":false}`. The
+server skips its longer finalisation wait and builds the draft immediately.
+Tapping stop remains available at any time.
 
 Why the STT WebSocket is proxied by the backend:
 
@@ -57,6 +80,8 @@ Why the STT WebSocket is proxied by the backend:
   barge-in and correction possible without a reconnect.
 - The backend re-chunks any browser payload into exact 1024-byte frames, so the
   audio contract is enforced in one place.
+- The proxy also forwards Gnani's SSE TTS chunks, so the browser can start
+  playing the read-back before the whole sentence has been synthesised.
 
 ---
 
@@ -180,12 +205,18 @@ work. Keeping both behind one origin, as the Dockerfile does, avoids this.
 
 All names and IDs below are fictional.
 
+> **Shortest judge path:** seed the demo data, open the app, tap **+**, choose
+> **Voice**, speak Demo 1, pause for 3 seconds, then confirm the read-back.
+
 ### Demo 1 — normal pregnancy visit
 
 Tap the microphone and say:
 
 > "Lakshmi, beneficiary ID ASHA102. Pregnancy visit. Weight 55 kilo.
 > ANC completed. IFA tablets given. Next visit November 20."
+
+Stop by tapping the orb, or simply pause for 3 seconds; the app finishes
+automatically.
 
 Expected results:
 
@@ -228,6 +259,55 @@ Expected results:
 A typed-input fallback is available inside the recording screen ("Type
 instead · demo fallback") for noisy venues where the microphone fails. It
 injects text into the same pipeline, so the rest of the behaviour is identical.
+
+---
+
+## Measured performance and noise evidence
+
+Measured on 2026-11-17 from the development machine over its normal internet
+connection, against the live Gnani service. These are observed numbers, not an
+SLA; absolute latency will vary by host, region and network.
+
+| Measurement | Result | How it was measured |
+| --- | --- | --- |
+| TTS REST, full WAV | 3.86 s cold; 2.71–2.83 s warm | three direct `synthesize()` calls after server start |
+| TTS SSE, first audio body | 1.94 s cold; **0.59–0.66 s warm** | time to first body byte from `POST /api/tts/stream` |
+| TTS SSE, full read-back | 3.52 s cold; 2.00–2.38 s warm | same request, until the stream ended |
+| Auto endpoint, clean fixture | **0.42 s** stop→draft and stop→speak | `tools/e2e_audio.py --auto` |
+| Auto endpoint, 1.5 s mid-note pause | **0.42 s** stop→draft; complete two-segment transcript | padded `sample_visit.wav` |
+| Auto endpoint, 15 dB SNR noise | **0.43 s** stop→draft; exact fields | noise-mixed `sample_visit.wav` |
+| Manual stop | 1.14 s stop→draft and stop→speak | `tools/e2e_audio.py` |
+
+“Cold” means the first request after a server start; “warm” means the pooled
+HTTPS connection was already open. The streaming path forwards raw 16 kHz
+`pcm_s16le`; the browser schedules chunks back-to-back on the AudioContext clock
+and falls back to the REST WAV endpoint if the stream fails.
+
+### Endpointing method
+
+- Gnani's VAD closes a segment after ~600 ms of silence **frames**. The browser
+  mic keeps sending frames during a pause, so the final arrives before the
+  client endpoint fires.
+- The client only auto-stops after it has seen speech above RMS level `0.16`,
+  at least one interim transcript, and 3 s of subsequent silence. It ignores the
+  mic while the agent is speaking, so read-back audio cannot end the visit.
+  Tapping the orb always stops immediately.
+- `--auto` in `e2e_audio.py` streams 3 s of real zero frames rather than merely
+  sleeping. Sleeping without audio does not simulate a browser microphone and
+  does not let the service VAD close the last segment.
+- The 1.5 s mid-note pause is deliberate: it proves that a natural pause splits
+  the transcript into two finals without losing the second half of the note.
+
+### Noise method
+
+- The fixture is the same real-audio demo note, with additive white Gaussian
+  noise scaled to **15 dB SNR over speech-active frames** (20 dB was also
+  generated; 15 dB is the reported stress case).
+- The noisy run produced the same name, ID, visit type, weight, ANC/IFA status
+  and next-visit date as the clean run, with 20 interim frames.
+- This is a synthetic, single-noise-type test. It is evidence that the pipeline
+  tolerates one realistic noise level; it is **not** a field study and does not
+  cover babble, music, wind or multiple speakers.
 
 ---
 
@@ -291,9 +371,13 @@ Safety properties:
 
 | ID | Source and version | Sections used | Rules derived | Pages |
 | --- | --- | --- | --- | --- |
-| G1 | Ministry of Health and Family Welfare (MoHFW), Government of India — *Guidelines for Antenatal Care and Skilled Attendance at Birth by ANMs/LHVs/SNs*, **2010** | "Danger signs during pregnancy"; referral guidance | vaginal bleeding; severe headache/blurred vision; convulsions; high fever; reduced/absent fetal movement; swelling of face/hands; leaking fluid; severe abdominal pain; difficulty breathing | **Pending verification** — do not cite a page number until checked against the source |
-| G2 | MoHFW / National Health Systems Resource Centre (NHSRC) — *Home Based Newborn Care (HBNC) Operational Guide*, **2014** | "Newborn danger signs"; low birth weight; referral | not feeding/poor feeding; low body temperature; fast breathing; chest indrawing; jaundice; umbilical redness/pus; persistent vomiting/no urine; low birth weight (<2.5 kg) | **Pending verification** |
-| G3 | MoHFW — *ASHA Module 6: "Skills that Save Lives"* (ASHA training modules) | Postpartum danger signs; recognition and referral | heavy bleeding after delivery; foul-smelling discharge or fever after delivery | **Pending verification** — confirm the edition/year from the copy used |
+| G1 | Ministry of Health and Family Welfare (MoHFW), Government of India — *Guidelines for Antenatal Care and Skilled Attendance at Birth by ANMs/LHVs/SNs*, **2010** — [official PDF](https://nhm.gov.in/images/pdf/programmes/maternal-health/guidelines/sba_guidelines_for_skilled_attendance_at_birth.pdf) | "Danger signs during pregnancy"; referral guidance | vaginal bleeding; severe headache/blurred vision; convulsions; high fever; reduced/absent fetal movement; swelling of face/hands; leaking fluid; severe abdominal pain; difficulty breathing | **Pending verification** — do not cite a page number until checked against the source |
+| G2 | MoHFW / National Health Systems Resource Centre (NHSRC) — *Home Based Newborn Care (HBNC) Operational Guide*, **2014** — [official PDF](https://nhsrcindia.org/sites/default/files/2021-03/Revised%20HBNC%20Operational%20Guidelines%202014%20English.pdf) | "Newborn danger signs"; low birth weight; referral | not feeding/poor feeding; low body temperature; fast breathing; chest indrawing; jaundice; umbilical redness/pus; persistent vomiting/no urine; low birth weight (<2.5 kg) | **Pending verification** |
+| G3 | MoHFW — *ASHA Module 6: "Skills that Save Lives"* (ASHA training modules) — [official PDF](https://nhsrcindia.org/sites/default/files/2021-05/Skills%20that%20Save%20Lives%20ASHA%20Module%206%20English.pdf) | Postpartum danger signs; recognition and referral | heavy bleeding after delivery; foul-smelling discharge or fever after delivery | **Pending verification** — confirm the edition/year from the copy used |
+
+Each linked official copy was resolved on **2026-11-17** and returned HTTP 200
+with `Content-Type: application/pdf`. Page numbers are still deliberately not
+claimed; the links and section titles are the verifiable anchors for this build.
 
 These are the sources recorded on every `DangerHit.source` field (for example
 `G1 §Danger signs during pregnancy; G3`), so an auditor can trace an alert back
@@ -328,11 +412,15 @@ surfaces counts and urgent referrals.
 | --- | --- | --- |
 | `GET` | `/api/health` | Service and credential status |
 | `GET` | `/api/config` | Supported languages |
-| `POST` | `/api/tts` | Text → WAV proxy (key stays server-side) |
-| `GET` | `/api/visits?limit=30` | Recent visits |
+| `POST` | `/api/tts` | Text → WAV proxy (key stays server-side); REST fallback |
+| `POST` | `/api/tts/stream` | Text → raw 16 kHz `pcm_s16le` chunks over SSE |
+| `GET` | `/api/visits?limit=30&search=…&visit_type=…&date_from=…&date_to=…` | Recent visits with search and filters |
+| `POST` | `/api/visits/manual` | Manual record entry (first-class fallback) |
 | `GET` | `/api/visits/{id}` | One visit with follow-ups and alerts |
+| `PATCH` | `/api/visits/{id}` | Edit a saved visit |
 | `GET` | `/api/followups?status=pending` | Follow-up list |
 | `POST` | `/api/followups/{id}/complete` | Mark a task done |
+| `POST` | `/api/followups/{id}/reopen` | Undo “mark done” |
 | `GET` | `/api/stats` | Dashboard counts |
 
 ### WebSocket `/ws/visit?language=en-IN`
@@ -341,7 +429,7 @@ Client → server:
 
 - binary PCM frames (512 samples, 16-bit LE mono; the backend re-chunks)
 - `{"type":"start","language":"en-IN","sample_rate":16000}`
-- `{"type":"stop"}` — finish dictation and build the draft
+- `{"type":"stop","quiet":false}` — finish dictation and build the draft. `quiet:false` is the auto-endpoint path: the browser already waited for 3 s of silence, so the server skips the longer final wait. Omit `quiet` for a manual stop.
 - `{"type":"barge_in"}` — flush the open utterance after local playback stops
 - `{"type":"confirm"}` — save the reviewed record
 - `{"type":"cancel"}` — discard the visit
@@ -383,19 +471,41 @@ cd backend
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-The suite covers normalisation (including real ASR artefacts), date/weight
-parsing, extraction, absence of invented fields, danger rules and negation,
-corrections (including the decimal-vs-date regression), follow-up generation,
-and read-back wording in English and Tamil.
+The suite has **48 tests** and covers normalisation (including real ASR
+artefacts), date/weight parsing, extraction, absence of invented fields,
+vaccination `given` vs `due` handling, danger rules and negation, corrections
+(including the decimal-vs-date regression), follow-up generation, and read-back
+wording in English, Tamil and Hindi.
 
-End-to-end scripts (the server must be running on port 8000):
+End-to-end scripts:
 
 ```powershell
+# Each script starts a throwaway backend with an isolated database unless you
+# pass --url. They still call the live Gnani service, so GNANI_API_KEY is needed.
 .\.venv\Scripts\python.exe tools\e2e_ws.py normal
 .\.venv\Scripts\python.exe tools\e2e_ws.py danger
 .\.venv\Scripts\python.exe tools\e2e_ws.py correction
-.\.venv\Scripts\python.exe tools\e2e_audio.py   # real streaming STT; needs data/sample_visit.wav
+
+.\.venv\Scripts\python.exe tools\e2e_audio.py          # manual stop, real streaming STT
+.\.venv\Scripts\python.exe tools\e2e_audio.py --auto   # 3 s browser-style endpoint
 ```
+
+`--auto` sends 3 s of zero PCM frames after the note, exactly like the browser
+mic, then stops with `quiet=false`. Pass any 16 kHz mono WAV path to run the same
+checks on the 1.5 s-pause or noise-mixed fixtures.
+
+The browser suite needs the production build and a running server on port 8000:
+
+```powershell
+cd ..\frontend
+npm run build
+cd ..\backend
+.\.venv\Scripts\python.exe tools\seed_demo_data.py --force
+.\.venv\Scripts\python.exe tools\smoke_ui.py
+```
+
+Result for this build: **90/90 checks passed**. The suite creates a test visit,
+so reseed afterwards to restore the four synthetic demo visits.
 
 `tools/smoke_gnani.py` regenerates the demo WAV with TTS and checks the REST STT
 loopback. `tools/probe_partials.py` documents how live interim transcripts were
@@ -409,8 +519,9 @@ discovered.
 ## Gnani integration notes
 
 - **Endpoints:** streaming STT
-  `wss://api.vachana.ai/stt/v3/stream`; TTS
-  `https://api.vachana.ai/api/v1/tts/inference`.
+  `wss://api.vachana.ai/stt/v3/stream`; TTS REST
+  `https://api.vachana.ai/api/v1/tts/inference`; TTS SSE
+  `https://api.vachana.ai/api/v1/tts/sse`.
 - **Auth:** `x-api-key-id` (STT upgrade header) and `X-API-Key-ID` (REST TTS).
 - **Audio contract:** 512 samples / 1024 bytes per frame, 16-bit little-endian
   mono. The browser's native sample rate is declared in `x-sample-rate`; no
@@ -422,6 +533,14 @@ discovered.
   drives the live word-by-word UI.
 - **Final frames:** Gnani v3 emits `final_transcript`, not `transcript`; the
   backend normalises this to an internal `transcript` event.
+- **End-of-utterance:** Gnani's VAD finalises a segment after ~600 ms of silence
+  **frames**. The browser keeps streaming mic frames during a pause, so a final
+  arrives before the separate 3 s client endpoint fires. Sleeping without
+  sending frames does not simulate this and will not produce a final.
+- **Streaming TTS:** `/api/tts/stream` proxies Gnani SSE and forwards raw
+  16 kHz `pcm_s16le`; the browser starts playback on the first chunk. A pooled
+  `httpx.AsyncClient` is reused for both TTS endpoints and closed in the FastAPI
+  lifespan. `/api/tts` remains the full-WAV fallback.
 - **Keyterms bias:** passing an `ANC`/`IFA`/`ASHA` term list fixes real ASR
   errors such as `ASHAH 102 → ASHA 102`, `"Hence he completed" → ANC completed`
   and `Tifa → IFA`. Medical vocabulary is also repaired in `normalize.py`.
@@ -450,7 +569,7 @@ asha-voicecare/
 │   │   ├── dialog.py      read-back and correction parsing
 │   │   ├── db.py          SQLite persistence
 │   │   └── i18n.py        spoken strings, labels, warnings
-│   ├── tests/             40 unit tests
+│   ├── tests/             48 unit tests
 │   ├── tools/             E2E, audio, smoke and probe scripts
 │   └── data/              generated SQLite DB and demo WAV (gitignored)
 ├── frontend/
@@ -470,11 +589,21 @@ asha-voicecare/
   phrasing. Unusual sentence structures can leave fields missing; the app then
   asks rather than guessing. A production build should add more local-language
   evaluation data.
+- Field-accuracy evidence comes from one synthetic voice, plus a 1.5 s-pause
+  variant and a 15 dB-SNR noise variant. There is no real ASHA speech corpus and
+  no field validation yet; code-mixed Tamil/Hindi extraction is tested on a
+  small set of phrases.
 - Only three UI languages are wired (of Gnani's ten).
 - SQLite is single-node and has no authentication. The Supabase schema is ready
-  but the repository layer is not yet switched over.
-- Barge-in uses a simple RMS threshold. Very noisy environments may need
-  per-device calibration or server-side VAD.
+  but the repository layer is not yet switched over. Do not put real beneficiary
+  data into this prototype.
+- Barge-in and automatic endpointing both use a fixed client RMS threshold
+  (`0.16`). Quiet or unusually loud devices may need calibration. The 3 s
+  silence endpoint is a fixed UX default, not the result of a field study.
+- The 15 dB noise test adds synthetic white Gaussian noise only. Babble, music,
+  wind and multiple simultaneous speakers remain untested.
+- Latency was measured from a development network and includes Gnani service
+  time. It is not an SLA and will vary by host, region and load.
 - STT/TTS require network connectivity. There is no offline model.
 - Guideline page numbers remain unverified (see the citation block). This is a
   deliberate anti-fabrication placeholder, not an oversight.

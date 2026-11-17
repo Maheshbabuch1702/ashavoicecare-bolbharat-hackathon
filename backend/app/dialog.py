@@ -51,6 +51,19 @@ def format_weight(value: float | None, language: str) -> str:
     return f"{number} kilograms"
 
 
+def _speak_identifier(value: str | None) -> str:
+    """Read IDs digit by digit so 'ASHA102' is not spoken as 'one hundred two'."""
+    if not value:
+        return ""
+    spoken = re.sub(
+        r"([A-Za-z]+)(\d+)",
+        lambda match: f"{match.group(1)} {' '.join(match.group(2))}",
+        value,
+    )
+    spoken = re.sub(r"(?<=\d)(?=\d)", " ", spoken)
+    return re.sub(r"\s+", " ", spoken).strip()
+
+
 def _status_text(key: str, value: bool | None, language: str) -> str:
     if value is None:
         return YES_NO[f"{key}_unknown"][language]
@@ -72,6 +85,8 @@ def build_readback(record: VisitRecord, language: str, *, missing: list[str] | N
 
     if language == "ta-IN":
         parts.append(f"நோயாளி {record.patient_name}" if record.patient_name else "இந்த நோயாளி")
+        if record.beneficiary_id:
+            parts.append(f"பயனாளி ஐடி {_speak_identifier(record.beneficiary_id)}")
         parts.append(_speech_visit_type(record.visit_type, language))
         if record.weight_kg is not None:
             parts.append(f"எடை {format_weight(record.weight_kg, language)}")
@@ -82,11 +97,16 @@ def build_readback(record: VisitRecord, language: str, *, missing: list[str] | N
         if record.vaccination_status == "given":
             parts.append("தடுப்பூசி வழங்கப்பட்டது")
         elif record.vaccination_status == "due":
-            parts.append("தடுப்பூசி நிலுவையில் உள்ளது")
+            if record.vaccines_due:
+                parts.append("தடுப்பூசி நிலுவை " + ", ".join(record.vaccines_due))
+            else:
+                parts.append("தடுப்பூசி நிலுவையில் உள்ளது")
         if record.next_visit_date:
             parts.append(f"அடுத்த வருகை {format_date(record.next_visit_date, language)}")
     elif language == "hi-IN":
         parts.append(f"मरीज़ {record.patient_name}" if record.patient_name else "यह मरीज़")
+        if record.beneficiary_id:
+            parts.append(f"लाभार्थी आईडी {_speak_identifier(record.beneficiary_id)}")
         parts.append(_speech_visit_type(record.visit_type, language))
         if record.weight_kg is not None:
             parts.append(f"वज़न {format_weight(record.weight_kg, language)}")
@@ -97,11 +117,16 @@ def build_readback(record: VisitRecord, language: str, *, missing: list[str] | N
         if record.vaccination_status == "given":
             parts.append("टीकाकरण हो गया")
         elif record.vaccination_status == "due":
-            parts.append("टीकाकरण बाकी है")
+            if record.vaccines_due:
+                parts.append("टीकाकरण बाकी " + ", ".join(record.vaccines_due))
+            else:
+                parts.append("टीकाकरण बाकी है")
         if record.next_visit_date:
             parts.append(f"अगली विज़िट {format_date(record.next_visit_date, language)}")
     else:
         parts.append(f"Patient {record.patient_name}" if record.patient_name else "This patient")
+        if record.beneficiary_id:
+            parts.append(f"Beneficiary ID {_speak_identifier(record.beneficiary_id)}")
         parts.append(_speech_visit_type(record.visit_type, language))
         if record.weight_kg is not None:
             parts.append(f"Weight {format_weight(record.weight_kg, language)}")
@@ -112,7 +137,10 @@ def build_readback(record: VisitRecord, language: str, *, missing: list[str] | N
         if record.vaccination_status == "given":
             parts.append("Vaccination given")
         elif record.vaccination_status == "due":
-            parts.append("Vaccination is pending")
+            if record.vaccines_due:
+                parts.append("Vaccines due " + ", ".join(record.vaccines_due))
+            else:
+                parts.append("Vaccination is pending")
         if record.next_visit_date:
             parts.append(f"Next visit {format_date(record.next_visit_date, language)}")
 

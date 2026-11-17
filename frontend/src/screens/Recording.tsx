@@ -63,17 +63,22 @@ export function RecordingScreen({
           <div className="flex flex-col items-center gap-3 py-6">
             <span className="h-10 w-10 animate-spin rounded-full border-4 border-brand-200 border-t-brand-700" />
             <p className="text-sm font-semibold text-slate-700">{S.processing[language]}</p>
-            <p className="text-xs text-slate-400">{S.listening[language]}</p>
+            <p className="text-xs text-slate-400">{S.finishing[language]}</p>
           </div>
         ) : (
-          <VoiceOrb
-            active
-            level={level}
-            onClick={onStop}
-            label={S.tapToStop[language]}
-            hint={S.speakNow[language]}
-            language={language}
-          />
+          <div>
+            <VoiceOrb
+              active
+              level={level}
+              onClick={onStop}
+              label={S.tapToStop[language]}
+              hint={S.speakNow[language]}
+              language={language}
+            />
+            <p className="mt-3 text-center text-[11px] leading-snug text-slate-400">
+              {S.autoFinishHint[language]}
+            </p>
+          </div>
         )}
         {phase === "recording" && (
           <div className="mt-4 flex flex-col items-center gap-2">

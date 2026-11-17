@@ -70,7 +70,26 @@ _VACCINES = {
     "Rotavirus": r"rota",
     "PCV": r"\bpcv\b|pneumococcal",
     "IPV": r"\bipv\b",
+    "Vitamin A": r"vitamin\s*a\b",
 }
+
+# "TT injection given" and "MR vaccine due" must not produce the same record.
+# Due is tested first so "not given" is correctly treated as pending.
+_VACCINE_DUE = re.compile(
+    r"\b(?:due|pending|not given|not done|yet to|remaining|next dose)\b"
+    r"|நிலுவை|பாக்கி|கொடுக்கவில்லை|போடவில்லை|இன்னும்"
+    r"|बाकी|देना है|नहीं दिया|नहीं दी|नहीं लगा|शेष|अगली खुराक"
+)
+_VACCINE_GIVEN = re.compile(
+    r"\b(?:given|administered|provided|received|done|completed|vaccinated)\b"
+    r"|கொடுத்த|வழங்கிய|போட்ட|முடிந்த"
+    r"|दिया|दी गई|लगाया|लगा दिया|हो गया|पूरा"
+)
+_NO_VACCINE_DUE = re.compile(
+    r"\b(?:no|not)\b[^.!?]{0,30}\b(?:due|pending)\b"
+    r"|தேவை இல்லை|தேவையில்லை"
+    r"|बाकी नहीं|नहीं बाकी|ज़रूरत नहीं|जरूरत नहीं"
+)
 
 _OBSERVATION_HINTS = (
     "complain", "pain", "advice", "advised", "counsel", "reported", "says", "told",
@@ -315,12 +334,43 @@ def extract_rules(
         record.confidence["ifa_provided"] = ifa_conf
         record.evidence["ifa_provided"] = ifa_evidence
 
-    vaccines = [name for name, pattern in _VACCINES.items() if re.search(pattern, lowered)]
-    if vaccines:
-        record.vaccines_due = vaccines
-        record.vaccination_status = "given"
-        record.confidence["vaccination_status"] = 0.85
-        record.evidence["vaccination_status"] = ", ".join(vaccines)
+    vaccine_names = [name for name, pattern in _VACCINES.items() if re.search(pattern, lowered)]
+    if vaccine_names:
+        due_names: list[str] = []
+        given_names: list[str] = []
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", raw):
+            folded_sentence = fold(sentence)
+            names = [
+                name
+                for name, pattern in _VACCINES.items()
+                if re.search(pattern, folded_sentence)
+            ]
+            if not names:
+                continue
+            if _NO_VACCINE_DUE.search(folded_sentence):
+                continue
+            if _VACCINE_DUE.search(folded_sentence):
+                due_names.extend(name for name in names if name not in due_names)
+            elif _VACCINE_GIVEN.search(folded_sentence):
+                given_names.extend(name for name in names if name not in given_names)
+
+        if due_names:
+            record.vaccination_status = "due"
+            record.vaccines_due = due_names
+            record.confidence["vaccination_status"] = 0.9
+            record.evidence["vaccination_status"] = "due: " + ", ".join(due_names)
+        elif given_names:
+            record.vaccination_status = "given"
+            record.vaccines_due = []
+            record.confidence["vaccination_status"] = 0.9
+            record.evidence["vaccination_status"] = "given: " + ", ".join(given_names)
+        else:
+            # A bare vaccine name does not prove the dose was given or is due.
+            # Never invent either status; ask the worker to confirm it.
+            record.vaccination_status = "not_specified"
+            record.vaccines_due = []
+            record.confidence["vaccination_status"] = 0.35
+            record.evidence["vaccination_status"] = "mentioned: " + ", ".join(vaccine_names)
     elif re.search(r"vaccin|immuni[sz]|தடுப்பூசி|टीकाकरण|टीका", lowered):
         record.vaccination_status = "due"
         record.confidence["vaccination_status"] = 0.8

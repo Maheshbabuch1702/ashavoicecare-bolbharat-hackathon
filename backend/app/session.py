@@ -77,7 +77,7 @@ class VisitSession:
         if kind == "start":
             await self.start(language=message.get("language"), sample_rate=message.get("sample_rate"))
         elif kind == "stop":
-            await self.finish_recording()
+            await self.finish_recording(quiet=bool(message.get("quiet", True)))
         elif kind == "confirm":
             await self.save()
         elif kind == "cancel":
@@ -108,6 +108,8 @@ class VisitSession:
         self.first_alarm = None
         self.corrections = []
         self.buffer.clear()
+        self._last_transcript_at = 0.0
+        self._transcript_event.clear()
 
         self.stt = GnaniSTTStream(
             language=self.language,
@@ -157,6 +159,8 @@ class VisitSession:
         self.danger = []
         self.corrections = []
         self.buffer.clear()
+        self._last_transcript_at = 0.0
+        self._transcript_event.clear()
 
     # ------------------------------------------------------- STT event path
     async def _on_frame(self, frame: dict) -> None:
@@ -270,23 +274,34 @@ class VisitSession:
             self.first_alarm = warning
 
     # ---------------------------------------------------------- end of note
-    async def finish_recording(self) -> None:
+    async def finish_recording(self, *, quiet: bool = True) -> None:
         if self.state != "recording":
             return
         self.state = "finalising"
         if self.stt:
             await self.stt.commit()
 
-        # Wait for the last utterance to be transcribed: quiet for 1.1 s, max 6 s.
-        deadline = time.monotonic() + 6.0
-        quiet_until = time.monotonic() + 1.1
-        while time.monotonic() < deadline:
+        if quiet:
+            # Manual stop: wait for the last utterance to be transcribed:
+            # quiet for 1.1 s, max 6 s.
+            deadline = time.monotonic() + 6.0
+            quiet_until = time.monotonic() + 1.1
+            while time.monotonic() < deadline:
+                await asyncio.sleep(0.15)
+                if self._transcript_event.is_set():
+                    self._transcript_event.clear()
+                    quiet_until = time.monotonic() + 1.1
+                if time.monotonic() >= quiet_until:
+                    break
+        else:
+            # Automatic endpoint: the client already waited 3 s of silence and
+            # Gnani's VAD has closed the last utterance, so its final should
+            # already be here. Wait a short grace for a final frame in flight;
+            # if no transcript arrived at all, give the commit the same longer
+            # window a manual stop would have had. Then let late frames settle.
+            grace = 0.25 if self.transcript.strip() else 1.2
+            await asyncio.sleep(grace)
             await asyncio.sleep(0.15)
-            if time.monotonic() >= quiet_until:
-                break
-            if self._transcript_event.is_set():
-                self._transcript_event.clear()
-                quiet_until = time.monotonic() + 1.1
 
         if not self.transcript.strip():
             self.state = "recording"
@@ -444,7 +459,6 @@ class VisitSession:
                 "high_fever": ("fever", "காய்ச்ச", "बुखार"),
                 "convulsions": ("convuls", "fit", "வலிப்ப", "दौर"),
                 "severe_headache": ("headache", "தலைவலி", "सिरदर्द"),
-                "newborn_jjaundice": ("jaundice", "மஞ்சள்", "पीलिया"),
                 "newborn_jaundice": ("jaundice", "மஞ்சள்", "पीलिया"),
                 "newborn_not_feeding": ("feed", "பால்", "दूध"),
             }.get(hit.code, ())

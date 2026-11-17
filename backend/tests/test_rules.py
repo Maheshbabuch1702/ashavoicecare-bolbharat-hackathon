@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.danger import detect
 from app.dialog import build_readback, parse_correction
-from app.extract import extract_rules
+from app.extract import VisitRecord, extract_rules
 from app.followups import build_followups
 from app.normalize import normalise, parse_date, parse_weight
 
@@ -117,6 +117,44 @@ class ExtractionTests(unittest.TestCase):
     def test_hbnc_in_newborn_note_does_not_set_anc(self) -> None:
         record = extract_rules("Newborn HBNC completed. Weight 2.8 kilo.", today=TODAY)
         self.assertIsNone(record.anc_completed)
+
+    def test_tt_given_is_not_recorded_as_due(self) -> None:
+        record = extract_rules("TT injection given. Weight 55 kilo.", today=TODAY)
+        self.assertEqual(record.vaccination_status, "given")
+        self.assertEqual(record.vaccines_due, [])
+
+    def test_tt_due_is_recorded_with_name(self) -> None:
+        record = extract_rules("TT injection due. Weight 55 kilo.", today=TODAY)
+        self.assertEqual(record.vaccination_status, "due")
+        self.assertIn("TT", record.vaccines_due)
+
+    def test_tt_not_given_is_due(self) -> None:
+        record = extract_rules("TT injection not given. Weight 55 kilo.", today=TODAY)
+        self.assertEqual(record.vaccination_status, "due")
+        self.assertIn("TT", record.vaccines_due)
+
+    def test_tt_given_in_left_arm_is_not_due(self) -> None:
+        record = extract_rules("TT injection given in left arm. Weight 55 kilo.", today=TODAY)
+        self.assertEqual(record.vaccination_status, "given")
+        self.assertEqual(record.vaccines_due, [])
+
+    def test_named_due_vaccines_are_kept(self) -> None:
+        record = extract_rules(
+            "Arjun, immunization visit. Weight 9.2 kilo. MR and Vitamin A vaccine due.",
+            today=TODAY,
+        )
+        self.assertEqual(record.vaccination_status, "due")
+        self.assertEqual(record.vaccines_due, ["MR", "Vitamin A"])
+
+    def test_bare_vaccine_name_does_not_invent_status(self) -> None:
+        record = extract_rules("Immunization visit. MR vaccine mentioned.", today=TODAY)
+        self.assertEqual(record.vaccination_status, "not_specified")
+        self.assertEqual(record.vaccines_due, [])
+
+    def test_tamil_tt_given(self) -> None:
+        record = extract_rules("TT ஊசி கொடுத்தேன். எடை 55 கிலோ.", language="ta-IN", today=TODAY)
+        self.assertEqual(record.vaccination_status, "given")
+        self.assertEqual(record.vaccines_due, [])
 
 
 class DangerTests(unittest.TestCase):
@@ -267,9 +305,32 @@ class ReadbackTests(unittest.TestCase):
         record = extract_rules(DEMO_1, today=TODAY)
         text = build_readback(record, "en-IN")
         self.assertIn("Lakshmi", text)
+        self.assertIn("Beneficiary ID ASHA 1 0 2", text)
         self.assertIn("55", text)
         self.assertIn("November 20", text)
         self.assertIn("Is this correct?", text)
+
+    def test_due_vaccines_are_named_in_all_languages(self) -> None:
+        record = VisitRecord(
+            beneficiary_id="ASHA120",
+            patient_name="Arjun",
+            visit_type="immunization",
+            weight_kg=9.2,
+            vaccination_status="due",
+            vaccines_due=["MR", "Vitamin A"],
+            next_visit_date="2026-11-20",
+        )
+        english = build_readback(record, "en-IN")
+        self.assertIn("Vaccines due MR, Vitamin A", english)
+        self.assertIn("Beneficiary ID ASHA 1 2 0", english)
+
+        tamil = build_readback(record, "ta-IN")
+        self.assertIn("பயனாளி ஐடி ASHA 1 2 0", tamil)
+        self.assertIn("தடுப்பூசி நிலுவை MR, Vitamin A", tamil)
+
+        hindi = build_readback(record, "hi-IN")
+        self.assertIn("लाभार्थी आईडी ASHA 1 2 0", hindi)
+        self.assertIn("टीकाकरण बाकी MR, Vitamin A", hindi)
 
     def test_missing_field_is_asked(self) -> None:
         record = extract_rules("Pregnancy visit, weight 55 kilo.", today=TODAY)

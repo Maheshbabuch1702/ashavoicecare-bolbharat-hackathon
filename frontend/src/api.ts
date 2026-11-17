@@ -78,4 +78,38 @@ export const api = {
     if (!response.ok) throw new Error("Text-to-speech failed");
     return response.arrayBuffer();
   },
+
+  /** Yield 16-bit mono PCM chunks as Gnani synthesises them. */
+  async *speakStream(text: string, language: string): AsyncGenerator<Int16Array> {
+    const response = await fetch(`${BASE}/api/tts/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, language }),
+    });
+    if (!response.ok || !response.body) throw new Error("Text-to-speech stream failed");
+    const reader = response.body.getReader();
+    let carry = new Uint8Array(0);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.length === 0) continue;
+        const bytes = new Uint8Array(carry.length + value.length);
+        bytes.set(carry);
+        bytes.set(value, carry.length);
+        const even = bytes.length - (bytes.length % 2);
+        if (even === 0) {
+          carry = bytes;
+          continue;
+        }
+        const view = new DataView(bytes.buffer, bytes.byteOffset, even);
+        const pcm = new Int16Array(even / 2);
+        for (let i = 0; i < pcm.length; i += 1) pcm[i] = view.getInt16(i * 2, true);
+        carry = bytes.slice(even);
+        yield pcm;
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  },
 };

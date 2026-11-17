@@ -44,6 +44,11 @@ export class VoiceClient {
   private node: AudioWorkletNode | null = null;
   private sink: GainNode | null = null;
   private source: AudioBufferSourceNode | null = null;
+  private pcmSources: AudioBufferSourceNode[] = [];
+  private pcmTimer: number | null = null;
+  private pcmDone: (() => void) | null = null;
+  private wavDone: (() => void) | null = null;
+  private playToken = 0;
   private workletReady = false;
   private bargeFrames = 0;
 
@@ -152,7 +157,9 @@ export class VoiceClient {
   async play(wav: ArrayBuffer, options: { mute?: boolean } = {}): Promise<void> {
     if (!this.context) return;
     this.stop();
+    const token = ++this.playToken;
     const buffer = await this.context.decodeAudioData(wav.slice(0));
+    if (token !== this.playToken || !this.context) return;
     const source = this.context.createBufferSource();
     source.buffer = buffer;
     source.connect(this.context.destination);
@@ -162,17 +169,93 @@ export class VoiceClient {
     this.muted = options.mute ?? false;
     this.bargeFrames = 0;
     await new Promise<void>((resolve) => {
-      source.onended = () => {
-        this.playing = false;
-        this.source = null;
-        this.muted = previousMute;
+      this.wavDone = () => {
+        this.wavDone = null;
         resolve();
+      };
+      source.onended = () => {
+        if (this.source === source) {
+          this.source = null;
+          this.playing = false;
+          this.muted = previousMute;
+        }
+        this.wavDone?.();
       };
       source.start();
     });
   }
 
+  /**
+   * Play raw 16-bit PCM chunks as they arrive from the streaming TTS endpoint.
+   * Chunks are scheduled back-to-back on the AudioContext clock so network
+   * jitter between chunks does not create audible gaps.
+   */
+  async playPcm(
+    chunks: AsyncIterable<Int16Array>,
+    sampleRate = 16000,
+    options: { mute?: boolean } = {},
+  ): Promise<void> {
+    if (!this.context) return;
+    this.stop();
+    const token = this.playToken;
+    const context = this.context;
+    let playhead = context.currentTime + 0.08;
+    let started = false;
+    const previousMute = this.muted;
+    this.muted = options.mute ?? false;
+    const done = new Promise<void>((resolve) => {
+      this.pcmDone = resolve;
+    });
+    try {
+      for await (const pcm of chunks) {
+        if (token !== this.playToken) break;
+        if (pcm.length === 0) continue;
+        const buffer = context.createBuffer(1, pcm.length, sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < pcm.length; i += 1) data[i] = pcm[i] / 32768;
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(context.destination);
+        this.pcmSources.push(source);
+        const startAt = Math.max(playhead, context.currentTime + 0.02);
+        source.start(startAt);
+        playhead = startAt + buffer.duration;
+        source.onended = () => {
+          const index = this.pcmSources.indexOf(source);
+          if (index >= 0) this.pcmSources.splice(index, 1);
+        };
+        if (!started) {
+          started = true;
+          this.playing = true;
+          this.bargeFrames = 0;
+        }
+      }
+      if (started && token === this.playToken) {
+        const remaining = Math.max(0, (playhead - context.currentTime) * 1000 + 80);
+        this.pcmTimer = window.setTimeout(() => {
+          this.pcmTimer = null;
+          this.pcmDone?.();
+        }, remaining);
+        await done;
+      }
+    } catch (error) {
+      if (token === this.playToken) this.stop();
+      throw error;
+    } finally {
+      if (token === this.playToken) {
+        this.playing = false;
+        this.muted = previousMute;
+        this.pcmDone = null;
+        if (this.pcmTimer !== null) {
+          window.clearTimeout(this.pcmTimer);
+          this.pcmTimer = null;
+        }
+      }
+    }
+  }
+
   stop(): void {
+    this.playToken += 1;
     if (this.source) {
       try {
         this.source.onended = null;
@@ -182,6 +265,23 @@ export class VoiceClient {
       }
       this.source = null;
     }
+    for (const source of this.pcmSources) {
+      try {
+        source.onended = null;
+        source.stop();
+      } catch {
+        // already stopped
+      }
+    }
+    this.pcmSources = [];
+    if (this.pcmTimer !== null) {
+      window.clearTimeout(this.pcmTimer);
+      this.pcmTimer = null;
+    }
+    this.pcmDone?.();
+    this.pcmDone = null;
+    this.wavDone?.();
+    this.wavDone = null;
     this.playing = false;
     this.muted = false;
   }

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 import wave
 from pathlib import Path
 
@@ -37,7 +38,7 @@ async def read_until(ws, predicate, timeout=40):
             return message, seen
 
 
-async def run(ws_base: str, path: str | None) -> int:
+async def run(ws_base: str, path: str | None, auto: bool = False) -> int:
     wav_path = Path(path) if path else ROOT / "data" / "sample_visit.wav"
     with wave.open(str(wav_path), "rb") as wav:
         assert wav.getframerate() == 16000, "demo WAV must be 16 kHz"
@@ -56,16 +57,26 @@ async def run(ws_base: str, path: str | None) -> int:
         for offset in range(0, len(pcm), FRAME_BYTES):
             await ws.send(pcm[offset : offset + FRAME_BYTES])
             await asyncio.sleep(0.032)
-        await asyncio.sleep(0.4)
-        await ws.send(json.dumps({"type": "stop"}))
+        # The browser mic keeps streaming (near-)silent frames after speech.
+        # Sending them is what lets Gnani's own VAD close the segment; sleeping
+        # without audio is not a realistic simulation and produces no final.
+        silence_frames = int((3.0 if auto else 0.4) / 0.032)
+        silence = bytes(FRAME_BYTES)
+        for _ in range(silence_frames):
+            await ws.send(silence)
+            await asyncio.sleep(0.032)
+        stop_at = time.perf_counter()
+        await ws.send(json.dumps({"type": "stop", **({"quiet": False} if auto else {})}))
 
         draft, seen = await read_until(ws, lambda m: m["type"] in {"draft", "error"}, timeout=45)
+        finalise_ms = (time.perf_counter() - stop_at) * 1000
         if draft["type"] == "error":
             print("FAILED:", draft["message"])
             return 1
 
         interims = [m for m in seen if m["type"] == "partial" and m.get("interim")]
         print(f"  interim frames: {len(interims)}")
+        print(f"  stop -> draft: {finalise_ms:.0f} ms")
         print(f"  transcript: {draft['record']['transcript']}")
         print(f"  record: name={draft['record']['patient_name']} id={draft['record']['beneficiary_id']} "
               f"type={draft['record']['visit_type']} weight={draft['record']['weight_kg']} "
@@ -78,6 +89,7 @@ async def run(ws_base: str, path: str | None) -> int:
 
         try:
             await read_until(ws, lambda m: m["type"] == "speak", timeout=6)
+            print(f"  stop -> speak frame: {(time.perf_counter() - stop_at) * 1000:.0f} ms")
         except asyncio.TimeoutError:
             print("  (no speak frame)")
 
@@ -100,11 +112,16 @@ def main() -> int:
         default="",
         help="reuse a running server, e.g. ws://127.0.0.1:8000/ws/visit",
     )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="wait 3 s then stop with quiet=false (simulates client endpointing)",
+    )
     args = parser.parse_args()
     if args.url:
-        return asyncio.run(run(args.url.rstrip("/"), args.wav))
+        return asyncio.run(run(args.url.rstrip("/"), args.wav, args.auto))
     with isolated_backend() as ws_base:
-        return asyncio.run(run(ws_base, args.wav))
+        return asyncio.run(run(ws_base, args.wav, args.auto))
 
 
 if __name__ == "__main__":

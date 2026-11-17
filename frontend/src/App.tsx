@@ -31,6 +31,11 @@ import { ManualScreen } from "./screens/Manual";
 import { VisitDetailScreen } from "./screens/VisitDetail";
 
 type Tab = "home" | "followups" | "history";
+
+// End-of-speech: after the worker has spoken, three seconds below the speech
+// threshold finalises the note. The mic level is 0..1 (RMS × 6 in audio.ts).
+const ENDPOINT_SILENCE_MS = 3_000;
+const SPEECH_LEVEL = 0.16;
 type AppError = { message: string; kind: "voice" | "general"; openTab?: boolean };
 type ToastState = {
   message: string;
@@ -117,6 +122,12 @@ export default function App() {
   const speechSeq = useRef(0);
   const languageRef = useRef(language);
   const phaseRef = useRef(phase);
+  const speakingRef = useRef(speaking);
+  const stopVisitRef = useRef<(immediate?: boolean) => void>(() => {});
+  const stoppingRef = useRef(false);
+  const speechHeardRef = useRef(false);
+  const lastSpeechAtRef = useRef(0);
+  const heardTextRef = useRef(false);
 
   useEffect(() => {
     languageRef.current = language;
@@ -130,6 +141,10 @@ export default function App() {
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+
+  useEffect(() => {
+    speakingRef.current = speaking;
+  }, [speaking]);
 
   useEffect(() => {
     const on = () => setOffline(false);
@@ -195,9 +210,14 @@ export default function App() {
     const id = ++speechSeq.current;
     setSpeaking(true);
     try {
-      const wav = await api.speak(text, lang);
-      if (id !== speechSeq.current) return;
-      await voice.play(wav, { mute });
+      try {
+        await voice.playPcm(api.speakStream(text, lang), 16000, { mute });
+      } catch (err) {
+        console.warn("Streaming TTS failed; falling back to WAV", err);
+        const wav = await api.speak(text, lang);
+        if (id !== speechSeq.current) return;
+        await voice.play(wav, { mute });
+      }
     } catch (err) {
       console.warn("TTS failed", err);
     } finally {
@@ -212,6 +232,7 @@ export default function App() {
         case "ready":
           break;
         case "partial":
+          heardTextRef.current = true;
           setTranscript(message.transcript);
           setLiveText(message.text);
           setLiveRecord(message.record);
@@ -263,6 +284,10 @@ export default function App() {
             voiceRef.current?.micOff();
             setPhase("home");
           } else if (phaseRef.current === "finalising") {
+            stoppingRef.current = false;
+            speechHeardRef.current = false;
+            lastSpeechAtRef.current = 0;
+            heardTextRef.current = false;
             setPhase("recording");
           }
           break;
@@ -309,6 +334,33 @@ export default function App() {
     });
   }, [handleMessage]);
 
+  const handleLevel = useCallback((value: number) => {
+    setLevel(value);
+    // Ignore the mic while the agent speaks so read-back audio cannot end the
+    // visit; barge-in clears `speaking` and the worker's reply is picked up.
+    if (phaseRef.current !== "recording" || speakingRef.current) {
+      speechHeardRef.current = false;
+      lastSpeechAtRef.current = 0;
+      return;
+    }
+    const now = performance.now();
+    if (value > SPEECH_LEVEL) {
+      speechHeardRef.current = true;
+      lastSpeechAtRef.current = now;
+      return;
+    }
+    if (
+      speechHeardRef.current &&
+      heardTextRef.current &&
+      lastSpeechAtRef.current > 0 &&
+      now - lastSpeechAtRef.current >= ENDPOINT_SILENCE_MS
+    ) {
+      speechHeardRef.current = false;
+      lastSpeechAtRef.current = 0;
+      stopVisitRef.current(true);
+    }
+  }, []);
+
   const ensureVoice = useCallback((): VoiceClient => {
     if (!voiceRef.current) {
       voiceRef.current = new VoiceClient({
@@ -316,9 +368,12 @@ export default function App() {
           const socket = wsRef.current;
           if (socket && socket.readyState === WebSocket.OPEN) socket.send(frame);
         },
-        onLevel: setLevel,
+        onLevel: handleLevel,
         onBargeIn: () => {
           voiceRef.current?.stop();
+          speakingRef.current = false;
+          speechHeardRef.current = false;
+          lastSpeechAtRef.current = 0;
           setSpeaking(false);
           const socket = wsRef.current;
           if (socket && socket.readyState === WebSocket.OPEN) {
@@ -328,9 +383,13 @@ export default function App() {
       });
     }
     return voiceRef.current;
-  }, []);
+  }, [handleLevel]);
 
   const resetVisitState = useCallback(() => {
+    stoppingRef.current = false;
+    speechHeardRef.current = false;
+    lastSpeechAtRef.current = 0;
+    heardTextRef.current = false;
     setDanger([]);
     setAlarmMessage(null);
     setTranscript("");
@@ -421,11 +480,24 @@ export default function App() {
     }
   }, [connect, ensureVoice, resetVisitState, starting, voiceConfigured, voiceErrorMessage]);
 
-  const stopVisit = useCallback(() => {
+  const endVisit = useCallback((immediate = false) => {
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    speechHeardRef.current = false;
+    lastSpeechAtRef.current = 0;
+    heardTextRef.current = false;
     setPhase("finalising");
     const socket = wsRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "stop" }));
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "stop", quiet: !immediate }));
+    }
   }, []);
+
+  const stopVisit = useCallback(() => endVisit(false), [endVisit]);
+
+  useEffect(() => {
+    stopVisitRef.current = endVisit;
+  }, [endVisit]);
 
   const cancelVisit = useCallback(() => {
     stopAudio();

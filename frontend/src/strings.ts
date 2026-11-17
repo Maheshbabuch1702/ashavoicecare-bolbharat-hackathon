@@ -178,6 +178,16 @@ export const S: Record<string, Dict> = {
     "ta-IN": "இப்போது பேசுங்கள்",
     "hi-IN": "अब बोलिए",
   },
+  autoFinishHint: {
+    "en-IN": "Tap to stop, or pause for 3 seconds and I’ll finish.",
+    "ta-IN": "நிறுத்த தட்டுங்கள், அல்லது 3 விநாடிகள் அமைதியாக இருந்தால் நானே முடித்துக்கொள்கிறேன்.",
+    "hi-IN": "रोकने के लिए टैप करें, या 3 सेकंड चुप रहने पर मैं खुद पूरा कर दूँगी.",
+  },
+  finishing: {
+    "en-IN": "Finishing the recording…",
+    "ta-IN": "பதிவை முடிக்கிறேன்…",
+    "hi-IN": "रिकॉर्डिंग पूरी कर रही हूँ…",
+  },
   correctionHint: {
     "en-IN": "Say “No, weight is 55.5 kilo” to correct any field.",
     "ta-IN": "“இல்லை, எடை 55.5 கிலோ” எனச் சொல்லி திருத்தலாம்.",

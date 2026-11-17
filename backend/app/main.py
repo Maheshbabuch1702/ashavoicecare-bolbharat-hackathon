@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -21,7 +21,7 @@ from .danger import detect
 from .dialog import build_readback
 from .extract import VisitRecord
 from .followups import build_followups
-from .gnani import synthesize
+from .gnani import TTS_SAMPLE_RATE, close_tts, synthesize, synthesize_stream
 from .i18n import SUPPORTED_LANGUAGES, normalise_language, t
 from .session import VisitSession
 
@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
-    yield
+    try:
+        yield
+    finally:
+        await close_tts()
 
 
 app = FastAPI(title="ASHA VoiceCare", version="0.1.0", lifespan=lifespan)
@@ -184,6 +187,44 @@ async def tts(request: TTSRequest) -> Response:
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Text-to-speech failed: {error}") from error
     return Response(content=audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/tts/stream")
+async def tts_stream(request: TTSRequest) -> StreamingResponse:
+    """Stream raw PCM so playback can begin before synthesis finishes."""
+    if not settings.gnani_ready:
+        raise HTTPException(status_code=503, detail="Gnani API key is not configured")
+    language = normalise_language(request.language)
+    stream = synthesize_stream(request.text, language, settings)
+    try:
+        # Wait for the first real chunk before sending headers, so an upstream
+        # auth/rate-limit failure becomes a normal 502 the client can fall back
+        # from instead of an empty 200 response.
+        first = await anext(stream)
+    except StopAsyncIteration as error:
+        await stream.aclose()
+        raise HTTPException(status_code=502, detail="Text-to-speech returned no audio") from error
+    except Exception as error:  # noqa: BLE001
+        await stream.aclose()
+        raise HTTPException(status_code=502, detail=f"Text-to-speech failed: {error}") from error
+
+    async def audio() -> Any:
+        try:
+            yield first
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    return StreamingResponse(
+        audio(),
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Sample-Rate": str(TTS_SAMPLE_RATE),
+            "X-Audio-Encoding": "pcm_s16le",
+        },
+    )
 
 
 @app.get("/api/visits")
