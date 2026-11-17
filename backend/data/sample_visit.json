@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "request_id": "01a1de27-8ddc-79d2-bc30-8ede4d81de01",
+  "transcript": "Lakshmi, beneficiary ID ASHAH 102, pregnancy visit weight 55 kilo. Hence he completed Tifa tablets given next visit 20 November.",
+  "model": "prisma-v3.0",
+  "processing_time": 0.20604944229125977,
+  "end_to_end_latency": 0.20816779136657715,
+  "detected_language_code": "en-IN"
+}
